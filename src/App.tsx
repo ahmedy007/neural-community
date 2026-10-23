@@ -1,28 +1,40 @@
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import type { FormEvent } from "react";
+import { supabase } from "./lib/supabase";
 import "./App.css";
 
-const questions = [
+type Question = {
+  id: string;
+  title: string;
+  body: string;
+  tags: string[];
+  created_at?: string;
+  answers: number;
+  views: number;
+};
+
+const sampleQuestions: Question[] = [
   {
+    id: "sample-1",
     title: "Why does my machine learning model overfit?",
-    description:
-      "My training accuracy is high, but validation accuracy is much lower. How can I improve generalization?",
+    body: "My training accuracy is high, but validation accuracy is much lower. How can I improve generalization?",
     tags: ["Machine Learning", "Python"],
     answers: 8,
     views: 243,
   },
   {
+    id: "sample-2",
     title: "How do I accelerate PyTorch training with CUDA?",
-    description:
-      "Looking for practical ways to improve GPU utilization and reduce training time.",
+    body: "Looking for practical ways to improve GPU utilization and reduce training time.",
     tags: ["PyTorch", "CUDA", "GPU"],
     answers: 5,
     views: 186,
   },
   {
+    id: "sample-3",
     title: "Which embedding model should I use for RAG?",
-    description:
-      "Comparing embedding models for a retrieval-augmented generation application.",
+    body: "Comparing embedding models for a retrieval-augmented generation application.",
     tags: ["LLMs", "RAG"],
     answers: 12,
     views: 421,
@@ -34,9 +46,169 @@ const topics = ["All", "Python", "Machine Learning", "LLMs", "CUDA", "PyTorch"];
 function App() {
   const [search, setSearch] = useState("");
   const [activeTopic, setActiveTopic] = useState("All");
+  const [questions, setQuestions] = useState<Question[]>(sampleQuestions);
+  const [loading, setLoading] = useState(true);
+  const [userId, setUserId] = useState<string | null>(null);
+  const [showForm, setShowForm] = useState(false);
+  const [title, setTitle] = useState("");
+  const [body, setBody] = useState("");
+  const [tagsText, setTagsText] = useState("");
+  const [message, setMessage] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+
+    async function loadQuestions() {
+      setLoading(true);
+
+      const [{ data: questionRows, error }, { data: answerRows }] =
+        await Promise.all([
+          supabase
+            .from("questions")
+            .select("id, title, body, tags, created_at")
+            .order("created_at", { ascending: false }),
+          supabase.from("answers").select("question_id"),
+        ]);
+
+      if (!active) return;
+
+      if (error) {
+        setMessage(`Could not load questions: ${error.message}`);
+        setQuestions(sampleQuestions);
+        setLoading(false);
+        return;
+      }
+
+      const counts = new Map<string, number>();
+      (answerRows ?? []).forEach((answer) => {
+        counts.set(
+          answer.question_id,
+          (counts.get(answer.question_id) ?? 0) + 1,
+        );
+      });
+
+      const realQuestions: Question[] = (questionRows ?? []).map((q) => ({
+        id: q.id,
+        title: q.title,
+        body: q.body,
+        tags: q.tags ?? [],
+        created_at: q.created_at,
+        answers: counts.get(q.id) ?? 0,
+        views: 0,
+      }));
+
+      setQuestions(realQuestions.length ? realQuestions : sampleQuestions);
+      setLoading(false);
+    }
+
+    async function loadUser() {
+      const { data } = await supabase.auth.getUser();
+      if (active) setUserId(data.user?.id ?? null);
+    }
+
+    void loadQuestions();
+    void loadUser();
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUserId(session?.user?.id ?? null);
+    });
+
+    return () => {
+      active = false;
+      subscription.unsubscribe();
+    };
+  }, []);
+
+  async function submitQuestion(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setMessage("");
+
+    if (!userId) {
+      setMessage("Please sign in before posting a question.");
+      return;
+    }
+
+    const cleanTitle = title.trim();
+    const cleanBody = body.trim();
+
+    if (cleanTitle.length < 10 || cleanBody.length < 10) {
+      setMessage("Title and description must each contain at least 10 characters.");
+      return;
+    }
+
+    const tags = tagsText
+      .split(",")
+      .map((tag) => tag.trim())
+      .filter(Boolean)
+      .slice(0, 5);
+
+    setSaving(true);
+
+    const { data, error } = await supabase
+      .from("questions")
+      .insert({
+        user_id: userId,
+        title: cleanTitle,
+        body: cleanBody,
+        tags,
+      })
+      .select("id, title, body, tags, created_at")
+      .single();
+
+    setSaving(false);
+
+    if (error) {
+      setMessage(`Could not post question: ${error.message}`);
+      return;
+    }
+
+    setQuestions((current) => [
+      {
+        ...data,
+        tags: data.tags ?? [],
+        answers: 0,
+        views: 0,
+      },
+      ...current.filter((question) => !question.id.startsWith("sample-")),
+    ]);
+
+    setTitle("");
+    setBody("");
+    setTagsText("");
+    setShowForm(false);
+    setMessage("Your question was published.");
+    setActiveTopic("All");
+    setSearch("");
+  }
+
+  async function signIn() {
+    const email = window.prompt("Enter your email address:");
+    if (!email) return;
+
+    const { error } = await supabase.auth.signInWithOtp({
+      email: email.trim(),
+      options: {
+        emailRedirectTo: window.location.origin,
+      },
+    });
+
+    setMessage(
+      error
+        ? `Could not send sign-in link: ${error.message}`
+        : "Check your email for your sign-in link.",
+    );
+  }
+
+  async function signOut() {
+    const { error } = await supabase.auth.signOut();
+    setMessage(error ? error.message : "You have signed out.");
+  }
 
   const filteredQuestions = questions.filter((question) => {
-    const matchesSearch = `${question.title} ${question.description} ${question.tags.join(" ")}`
+    const matchesSearch = `${question.title} ${question.body} ${question.tags.join(" ")}`
       .toLowerCase()
       .includes(search.toLowerCase());
 
@@ -58,7 +230,9 @@ function App() {
           <a href="#topics">Topics</a>
           <a href="#about">About</a>
         </nav>
-        <a className="nav-cta" href="#questions">Explore community ↗</a>
+        <button className="nav-cta" onClick={userId ? signOut : signIn}>
+          {userId ? "Sign out" : "Sign in"}
+        </button>
       </header>
 
       <main>
@@ -106,13 +280,56 @@ function App() {
             </div>
             <button
               className="ask-button"
-              onClick={() =>
-                alert("Question posting will be available in a future update.")
-              }
+              onClick={() => {
+                setMessage("");
+                setShowForm((open) => !open);
+              }}
             >
               + Ask a question
             </button>
           </div>
+
+          {message && <p role="status">{message}</p>}
+
+          {showForm && (
+            <form className="question-form" onSubmit={submitQuestion}>
+              <h3>Ask the community</h3>
+              {!userId && (
+                <p>You need to sign in before publishing a question.</p>
+              )}
+              <label htmlFor="question-title">Title</label>
+              <input
+                id="question-title"
+                value={title}
+                onChange={(event) => setTitle(event.target.value)}
+                minLength={10}
+                maxLength={150}
+                required
+                placeholder="What do you need help with?"
+              />
+              <label htmlFor="question-body">Description</label>
+              <textarea
+                id="question-body"
+                value={body}
+                onChange={(event) => setBody(event.target.value)}
+                minLength={10}
+                maxLength={10000}
+                required
+                rows={5}
+                placeholder="Explain the problem and what you've tried..."
+              />
+              <label htmlFor="question-tags">Topics (comma-separated)</label>
+              <input
+                id="question-tags"
+                value={tagsText}
+                onChange={(event) => setTagsText(event.target.value)}
+                placeholder="Python, Machine Learning"
+              />
+              <button type="submit" className="ask-button" disabled={saving}>
+                {saving ? "Publishing..." : "Publish question"}
+              </button>
+            </form>
+          )}
 
           <div className="topics" id="topics">
             {topics.map((topic) => (
@@ -126,15 +343,17 @@ function App() {
             ))}
           </div>
 
+          {loading && <p>Loading questions...</p>}
+
           <div className="question-list">
             {filteredQuestions.map((question, index) => (
-              <article className="question-card" key={question.title}>
+              <article className="question-card" key={question.id}>
                 <div className="question-number">
                   {String(index + 1).padStart(2, "0")}
                 </div>
                 <div className="question-content">
                   <h3>{question.title}</h3>
-                  <p>{question.description}</p>
+                  <p>{question.body}</p>
                   <div className="question-tags">
                     {question.tags.map((tag) => (
                       <button
@@ -156,7 +375,7 @@ function App() {
               </article>
             ))}
 
-            {filteredQuestions.length === 0 && (
+            {!loading && filteredQuestions.length === 0 && (
               <div className="empty-state">
                 No matching questions. Try another search or topic.
               </div>
